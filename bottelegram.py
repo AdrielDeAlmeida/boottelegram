@@ -1,70 +1,50 @@
-import os
-import yt_dlp
 import asyncio
-import nest_asyncio
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+import time
+from playwright.async_api import async_playwright, TimeoutError
+from telegram import Bot
 
-BOT_TOKEN = "7601201978:AAFgaPst4KLZaQonFVt1j2KhHDzjnXyVOkA"
+TELEGRAM_BOT_TOKEN = "7601201978:AAFgaPst4KLZaQonFVt1j2KhHDzjnXyVOkA"
+TELEGRAM_CHAT_ID = "561035841"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Olá! Envie um link de vídeo do YouTube, TikTok, Instagram ou Facebook, e eu farei o download para você."
-    )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message.text.strip()
-
-    if any(domain in message for domain in [
-        "youtube.com", "youtu.be", "tiktok.com", "instagram.com", "facebook.com"
-    ]):
-        await update.message.reply_text("🔽 Link de vídeo detectado. Baixando, aguarde...")
-
-        ydl_opts = {
-            'outtmpl': 'video.%(ext)s',
-            'format': 'best[ext=mp4]/best',
-            'quiet': True,
-            'noplaylist': True,
-            'retries': 3,
-        }
-
+async def take_screenshot(url, filename):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(message, download=True)
-                filename = ydl.prepare_filename(info)
+            await page.goto(url, wait_until="networkidle")
+            time.sleep(10) # Espera explícita de 10 segundos para carregar o conteúdo dinâmico
+            
+            # Para revert.finance, vamos tentar esperar por um elemento que indique o carregamento da conta
+            await page.wait_for_selector("div.MuiBox-root.css-1r0q04m", timeout=30000) # Exemplo de seletor, pode precisar de ajuste
 
-            with open(filename, 'rb') as f:
-                await update.message.reply_video(video=f)
-
-            os.remove(filename)
-
+            await page.screenshot(path=filename, full_page=True)
+            print(f"Screenshot de {url} capturado com sucesso.")
+        except TimeoutError:
+            print(f"Erro de Timeout ao carregar a página {url}. Tentando capturar mesmo assim.")
+            await page.screenshot(path=filename, full_page=True)
         except Exception as e:
-            print("Erro:", e)
-            await update.message.reply_text(
-                f"❌ Erro ao baixar o vídeo:\n`{e}`",
-                parse_mode='Markdown'
-            )
-    else:
-        await update.message.reply_text("❌ Envie um link válido de vídeo.")
+            print(f"Erro ao capturar screenshot de {url}: {e}")
+        finally:
+            await browser.close()
+
+async def send_telegram_photo(photo_path, caption=None):
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    try:
+        with open(photo_path, 'rb') as photo_file:
+            await bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo_file, caption=caption)
+        print(f"Foto {photo_path} enviada para o Telegram com sucesso.")
+    except Exception as e:
+        print(f"Erro ao enviar foto {photo_path} para o Telegram: {e}")
 
 async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    urls = [
+        ("https://revert.finance/#/account/0x1c372443e4fC444F812c9e05C522b8E7521C4C00", "revert_finance.png")
+    ]
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("🤖 Bot rodando... Pressione Ctrl+C para parar.")
-    await app.run_polling()
+    for url, filename in urls:
+        await take_screenshot(url, filename)
+        await send_telegram_photo(filename, caption=f"Screenshot de {url}")
+    print("Processo de captura e envio de screenshots concluído.")
 
 if __name__ == "__main__":
-    # Apply nest_asyncio to allow running asyncio within an existing event loop
-    nest_asyncio.apply()
-    # Get the current event loop and run the main coroutine
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.run(main())
